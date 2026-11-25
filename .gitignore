@@ -4,4 +4,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 var/
+build/
+src/*.egg-info/
 
