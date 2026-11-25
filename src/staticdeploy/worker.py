@@ -39,8 +39,9 @@ class Worker:
             raise StoreError("webhook commit SHA is invalid")
         with tempfile.TemporaryDirectory(prefix="staticdeploy-") as temporary:
             checkout = Path(temporary) / "checkout"
-            self._command(["git", "clone", "--depth", "1", "--branch", job.ref, str(repository_url), str(checkout)], Path(temporary))
-            self._command(["git", "checkout", "--detach", job.commit_sha], checkout)
+            self._command(["git", "clone", "--no-checkout", str(repository_url), str(checkout)], Path(temporary))
+            self._command(["git", "fetch", "--depth", "1", "origin", job.commit_sha], checkout)
+            self._command(["git", "checkout", "--detach", "FETCH_HEAD"], checkout)
             build_command = settings["build_command"]
             if build_command:
                 self._command(shlex.split(str(build_command)), checkout)
@@ -74,12 +75,17 @@ class Worker:
     def _limits() -> None:
         # A cooperative build sandbox: no shell, 2 GiB virtual-memory ceiling,
         # and a 190-second CPU ceiling. Containers add the production boundary.
-        resource.setrlimit(resource.RLIMIT_AS, (2 * 1024**3, 2 * 1024**3))
-        resource.setrlimit(resource.RLIMIT_CPU, (190, 190))
+        for limit, value in ((resource.RLIMIT_AS, 2 * 1024**3), (resource.RLIMIT_CPU, 190)):
+            try:
+                resource.setrlimit(limit, (value, value))
+            except (OSError, ValueError):
+                # macOS does not support every Linux resource limit. The
+                # container boundary still applies in production.
+                continue
 
     @staticmethod
     def preview_slug(ref: str) -> str:
         slug = ref.lower().replace("/", "-")
-        slug = "".join(character if character.isalnum() or character == "-" else "-" for character in slug)
+        slug = "".join(character if character.isascii() and (character.isalnum() or character == "-") else "-" for character in slug)
         slug = slug.strip("-") or "preview"
         return slug[:63]

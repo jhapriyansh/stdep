@@ -90,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Processed {job.id}" if job else "No queued jobs")
                 if not args.watch:
                     break
+                store.remove_expired_previews()
                 time.sleep(args.poll_seconds)
         elif args.command == "cleanup":
             print(f"Removed {store.remove_expired_previews()} expired preview mappings")

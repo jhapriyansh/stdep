@@ -68,7 +68,7 @@ class StoreTests(unittest.TestCase):
             assert preview is not None
             self.assertEqual((preview / "index.html").read_text(), "preview")
 
-            job = store.queue_deploy("demo", "main", "abc123")
+            job = store.queue_deploy("demo", "main", "a" * 40)
             claimed = store.claim_job()
             self.assertEqual(claimed.id if claimed else None, job.id)
             store.finish_job(job.id, True, "complete")
@@ -116,4 +116,14 @@ class StoreTests(unittest.TestCase):
             with self.assertRaisesRegex(StoreError, "invalid domain"):
                 store.create_site("demo", ["bad/domain"])
             self.assertFalse(store.is_known_domain("bad/domain"))
+
+    def test_rejects_invalid_queued_deploy_metadata(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "data")
+            store.initialize()
+            store.create_site("demo", ["demo.test"])
+            with self.assertRaisesRegex(StoreError, "invalid deployment ref"):
+                store.queue_deploy("demo", "-bad", "a" * 40)
+            with self.assertRaisesRegex(StoreError, "invalid deployment commit SHA"):
+                store.queue_deploy("demo", "main", "not-a-sha")
 

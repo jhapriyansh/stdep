@@ -156,7 +156,10 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(body)
-            job = self.config.store.queue_deploy(slug, str(payload["ref"]).removeprefix("refs/heads/"), str(payload["after"]))
+            ref = str(payload["ref"])
+            if not ref.startswith("refs/heads/"):
+                raise ValueError("only branch push events are deployable")
+            job = self.config.store.queue_deploy(slug, ref.removeprefix("refs/heads/"), str(payload["after"]))
         except (KeyError, ValueError, json.JSONDecodeError, StoreError) as error:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)}, "webhook")
             return
@@ -179,7 +182,10 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = json.loads(body)
-            job = self.config.store.queue_deploy(slug, str(payload["ref"]).removeprefix("refs/heads/"), str(payload["after"]))
+            ref = str(payload["ref"])
+            if not ref.startswith("refs/heads/"):
+                raise ValueError("only branch push events are deployable")
+            job = self.config.store.queue_deploy(slug, ref.removeprefix("refs/heads/"), str(payload["after"]))
         except (KeyError, ValueError, json.JSONDecodeError, StoreError) as error:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)}, "webhook")
             return

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -12,6 +13,16 @@ from pathlib import Path
 
 class StoreError(RuntimeError):
     """Raised when a requested site or deploy cannot be resolved."""
+
+
+class _Connection(sqlite3.Connection):
+    """Commits/rolls back like sqlite's context manager, then closes eagerly."""
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> bool:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 @dataclass(frozen=True)
@@ -205,6 +216,10 @@ class Store:
 
     def queue_deploy(self, slug: str, ref: str, commit_sha: str) -> DeployJob:
         self._site_exists(slug)
+        if not ref or len(ref) > 255 or ref.startswith("-") or "\x00" in ref:
+            raise StoreError("invalid deployment ref")
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit_sha):
+            raise StoreError("invalid deployment commit SHA")
         job = DeployJob(secrets.token_urlsafe(12), slug, ref, commit_sha, "queued", self._timestamp(), None)
         with self._connect() as db:
             db.execute(
@@ -294,7 +309,7 @@ class Store:
         return row[0], root
 
     def _connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.db_path)
+        db = sqlite3.connect(self.db_path, factory=_Connection)
         db.execute("PRAGMA foreign_keys = ON")
         db.execute("PRAGMA journal_mode = WAL")
         db.execute("PRAGMA busy_timeout = 5000")
@@ -336,7 +351,7 @@ class Store:
 
     @staticmethod
     def _validate_slug(slug: str) -> None:
-        if not slug or len(slug) > 63 or not all(c.islower() or c.isdigit() or c == "-" for c in slug):
+        if not slug or len(slug) > 63 or not all(c.isascii() and (c.islower() or c.isdigit() or c == "-") for c in slug):
             raise StoreError("site slug must contain lowercase letters, digits, and hyphens only")
 
     @staticmethod
