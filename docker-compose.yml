@@ -1,0 +1,36 @@
+services:
+  app:
+    build: .
+    environment:
+      STATICDEPLOY_ADMIN_TOKEN: ${STATICDEPLOY_ADMIN_TOKEN:?set in .env}
+      STATICDEPLOY_PREVIEW_SUFFIX: ${STATICDEPLOY_PREVIEW_SUFFIX:-preview.example.com}
+    volumes:
+      - staticdeploy-data:/data
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["staticdeploy", "--data-dir", "/data", "worker", "--watch"]
+    volumes:
+      - staticdeploy-data:/data
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.10
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  staticdeploy-data:
+  caddy-data:
+  caddy-config:

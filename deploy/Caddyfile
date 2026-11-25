@@ -1,0 +1,17 @@
+{
+	# The platform only authorizes certificates for domains in its SQLite store.
+	on_demand_tls {
+		ask http://app:8080/_platform/tls/allow
+	}
+}
+
+http:// {
+	reverse_proxy app:8080
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy app:8080
+}
