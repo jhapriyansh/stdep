@@ -308,6 +308,19 @@ class Store:
             return None
         return row[0], root
 
+    def resolve_site(self, slug: str) -> Path | None:
+        """Resolve a production deploy by slug for path-based routing."""
+        try:
+            self._validate_slug(slug)
+        except StoreError:
+            return None
+        with self._connect() as db:
+            row = db.execute("SELECT current_deploy_id FROM sites WHERE slug = ?", (slug,)).fetchone()
+        if row is None or row[0] is None:
+            return None
+        root = (self.deploy_root / slug / row[0]).resolve()
+        return root if root.is_dir() else None
+
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path, factory=_Connection)
         db.execute("PRAGMA foreign_keys = ON")

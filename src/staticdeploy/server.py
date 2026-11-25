@@ -37,6 +37,7 @@ class PlatformConfig:
     store: Store
     admin_token: str | None
     preview_suffix: str | None
+    routing_mode: str
     metrics: Metrics
 
 
@@ -89,12 +90,14 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
         return True
 
     def _serve(self, head_only: bool) -> None:
-        root = self._resolve_site_root()
-        if root is None:
-            self._error(HTTPStatus.NOT_FOUND, "Unknown host or no active deploy", "static")
+        resolved = self._resolve_content()
+        if resolved is None:
+            message = "Unknown path route or no active deploy" if self.config.routing_mode == "path" else "Unknown host or no active deploy"
+            self._error(HTTPStatus.NOT_FOUND, message, "static")
             return
+        root, request_path = resolved
         try:
-            target = self._safe_target(root)
+            target = self._safe_target(root, request_path)
         except ValueError:
             self._error(HTTPStatus.BAD_REQUEST, "Invalid request path", "static")
             return
@@ -128,6 +131,12 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
             self.wfile.write(response)
         self.config.metrics.record("static", HTTPStatus.OK)
 
+    def _resolve_content(self) -> tuple[Path, str] | None:
+        if self.config.routing_mode == "path":
+            return self._resolve_path_route()
+        root = self._resolve_site_root()
+        return (root, urlsplit(self.path).path) if root is not None else None
+
     def _resolve_site_root(self) -> Path | None:
         host = self.headers.get("Host", "").split(":", 1)[0].lower().rstrip(".")
         resolved = self.config.store.resolve_host(host)
@@ -138,6 +147,18 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
             if "--" in label:
                 preview, site = label.rsplit("--", 1)
                 return self.config.store.resolve_preview(preview, site)
+        return None
+
+    def _resolve_path_route(self) -> tuple[Path, str] | None:
+        parts = [part for part in urlsplit(self.path).path.split("/") if part]
+        if len(parts) >= 2 and parts[0] == "sites":
+            root = self.config.store.resolve_site(parts[1])
+            request_path = "/" + "/".join(parts[2:])
+            return (root, request_path) if root is not None else None
+        if len(parts) >= 3 and parts[0] == "previews":
+            root = self.config.store.resolve_preview(parts[2], parts[1])
+            request_path = "/" + "/".join(parts[3:])
+            return (root, request_path) if root is not None else None
         return None
 
     def _gitea_webhook(self, slug: str) -> None:
@@ -228,8 +249,9 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.config.metrics.record("metrics", HTTPStatus.OK)
 
-    def _safe_target(self, root: Path) -> Path:
-        candidate = (root / (unquote(urlsplit(self.path).path).lstrip("/") or "index.html")).resolve()
+    def _safe_target(self, root: Path, request_path: str | None = None) -> Path:
+        path = request_path if request_path is not None else urlsplit(self.path).path
+        candidate = (root / (unquote(path).lstrip("/") or "index.html")).resolve()
         if candidate != root and root not in candidate.parents:
             raise ValueError("path escapes deploy root")
         return candidate
@@ -280,8 +302,8 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
         print(f"{self.address_string()} - {format % args}")
 
 
-def serve(store: Store, host: str, port: int, *, admin_token: str | None, preview_suffix: str | None) -> None:
-    handler = type("ConfiguredStaticDeployHandler", (StaticDeployHandler,), {"config": PlatformConfig(store, admin_token, preview_suffix, Metrics())})
+def serve(store: Store, host: str, port: int, *, admin_token: str | None, preview_suffix: str | None, routing_mode: str) -> None:
+    handler = type("ConfiguredStaticDeployHandler", (StaticDeployHandler,), {"config": PlatformConfig(store, admin_token, preview_suffix, routing_mode, Metrics())})
     server = ThreadingHTTPServer((host, port), handler)
     print(f"StaticDeploy edge listening on http://{host}:{port}")
     try:

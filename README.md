@@ -12,6 +12,7 @@ immutable, auditable, and instant to roll back.
 - Activates a deploy or rolls back with one SQLite pointer update.
 - Serves sites by `Host` header with path-traversal protection, ETags, gzip, and
   correct immutable-asset cache headers.
+- Switches between production subdomain routing and localhost-friendly path routing.
 - Accepts signed Gitea push webhooks, queues deploy jobs, and runs a bounded
   Git checkout/build worker.
 - Publishes non-primary branches as expiring preview deployments.
@@ -41,6 +42,32 @@ Visit `http://localhost:8080`. The control API requires
 ```bash
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/_platform/api/sites
 ```
+
+## Routing modes
+
+`subdomain` is the default production mode. It resolves a site's custom domain
+from the HTTP `Host` header; preview URLs use
+`<branch>--<site>.<preview suffix>`. It requires DNS records and, for public
+HTTPS, a real domain.
+
+`path` is intended for local development and demos, where no domain is needed:
+
+```bash
+STATICDEPLOY_ROUTING_MODE=path staticdeploy --data-dir ./var serve --port 8080
+```
+
+With the example site deployed as `portfolio`, browse:
+
+```text
+http://localhost:8080/sites/portfolio/
+http://localhost:8080/previews/portfolio/<branch>/
+```
+
+The management endpoints remain under `/_platform/` in both modes. Path mode
+does not use custom-domain or wildcard-DNS routing. Sites used in path mode
+must use relative asset URLs (for example, `assets/app.js`, not `/assets/app.js`)
+or configure their static-site generator's base/public path as
+`/sites/<site>/`; root-absolute URLs have no site identity to route from.
 
 ## Git deploys and previews
 
@@ -95,7 +122,7 @@ staticdeploy deploy list <slug>
 staticdeploy rollback <slug> <deploy-id>
 staticdeploy worker [--watch]
 staticdeploy cleanup
-staticdeploy serve [--admin-token TOKEN] [--preview-suffix DOMAIN]
+staticdeploy serve [--routing-mode subdomain|path] [--admin-token TOKEN] [--preview-suffix DOMAIN]
 ```
 
 ## Architecture

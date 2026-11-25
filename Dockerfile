@@ -15,4 +15,4 @@ VOLUME ["/data"]
 EXPOSE 8080
 USER staticdeploy
 
-CMD ["sh", "-c", "staticdeploy --data-dir ${STATICDEPLOY_DATA_DIR} serve --host 0.0.0.0 --port 8080 --admin-token \"${STATICDEPLOY_ADMIN_TOKEN}\" --preview-suffix \"${STATICDEPLOY_PREVIEW_SUFFIX}\""]
+CMD ["sh", "-c", "staticdeploy --data-dir ${STATICDEPLOY_DATA_DIR} serve --host 0.0.0.0 --port 8080 --admin-token \"${STATICDEPLOY_ADMIN_TOKEN}\" --preview-suffix \"${STATICDEPLOY_PREVIEW_SUFFIX}\" --routing-mode \"${STATICDEPLOY_ROUTING_MODE:-subdomain}\""]

@@ -4,6 +4,7 @@ services:
     environment:
       STATICDEPLOY_ADMIN_TOKEN: ${STATICDEPLOY_ADMIN_TOKEN:?set in .env}
       STATICDEPLOY_PREVIEW_SUFFIX: ${STATICDEPLOY_PREVIEW_SUFFIX:-preview.example.com}
+      STATICDEPLOY_ROUTING_MODE: ${STATICDEPLOY_ROUTING_MODE:-subdomain}
     volumes:
       - staticdeploy-data:/data
     expose:

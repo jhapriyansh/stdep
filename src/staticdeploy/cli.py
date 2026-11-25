@@ -45,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     edge.add_argument("--port", default=8080, type=int)
     edge.add_argument("--admin-token", default=os.environ.get("STATICDEPLOY_ADMIN_TOKEN"))
     edge.add_argument("--preview-suffix", default=os.environ.get("STATICDEPLOY_PREVIEW_SUFFIX"))
+    edge.add_argument(
+        "--routing-mode",
+        choices=("subdomain", "path"),
+        default=os.environ.get("STATICDEPLOY_ROUTING_MODE", "subdomain"),
+        help="serve by Host header (subdomain) or /sites/<slug>/ paths (path)",
+    )
     worker = commands.add_parser("worker", help="process one queued Git deployment")
     worker.add_argument("--preview-ttl-hours", type=int, default=72)
     worker.add_argument("--command-timeout", type=int, default=180)
@@ -82,7 +88,10 @@ def main(argv: list[str] | None = None) -> int:
             store.rollback(args.slug, args.deploy_id)
             print(f"Rolled {args.slug} back to {args.deploy_id}")
         elif args.command == "serve":
-            serve(store, args.host, args.port, admin_token=args.admin_token, preview_suffix=args.preview_suffix)
+            serve(
+                store, args.host, args.port, admin_token=args.admin_token,
+                preview_suffix=args.preview_suffix, routing_mode=args.routing_mode,
+            )
         elif args.command == "worker":
             worker = Worker(store, preview_ttl_hours=args.preview_ttl_hours, command_timeout=args.command_timeout)
             while True:
