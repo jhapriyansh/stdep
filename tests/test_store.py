@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from datetime import UTC, datetime, timedelta
 
 from staticdeploy.store import Store, StoreError
 
@@ -49,4 +50,33 @@ class StoreTests(unittest.TestCase):
                 store.deploy("demo", empty)
             with self.assertRaisesRegex(StoreError, "unknown site"):
                 store.deploy("missing", empty)
+
+    def test_preview_queue_and_quota(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            store = Store(tmp_path / "data")
+            store.initialize()
+            secret = store.create_site("demo", ["demo.test"], "https://example.test/demo.git", quota_bytes=1024)
+            self.assertTrue(secret)
+            source = tmp_path / "site"
+            write_site(source, "preview")
+            deployed = store.deploy("demo", source, activate=False)
+            expiry = (datetime.now(UTC) + timedelta(hours=1)).isoformat(timespec="seconds")
+            store.create_preview("demo", "feature-card", "feature/card", deployed.id, expiry)
+            preview = store.resolve_preview("feature-card", "demo")
+            self.assertIsNotNone(preview)
+            assert preview is not None
+            self.assertEqual((preview / "index.html").read_text(), "preview")
+
+            job = store.queue_deploy("demo", "main", "abc123")
+            claimed = store.claim_job()
+            self.assertEqual(claimed.id if claimed else None, job.id)
+            store.finish_job(job.id, True, "complete")
+            self.assertEqual(store.list_jobs("demo")[0].status, "succeeded")
+
+            oversized = tmp_path / "oversized"
+            oversized.mkdir()
+            (oversized / "index.html").write_bytes(b"x" * 2048)
+            with self.assertRaisesRegex(StoreError, "exceeds"):
+                store.deploy("demo", oversized)
 

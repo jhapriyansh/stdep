@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
+import secrets
 import shutil
 import sqlite3
 from dataclasses import dataclass
@@ -23,6 +26,17 @@ class Deploy:
     file_count: int
 
 
+@dataclass(frozen=True)
+class DeployJob:
+    id: str
+    site_slug: str
+    ref: str
+    commit_sha: str
+    status: str
+    requested_at: str
+    message: str | None
+
+
 class Store:
     """SQLite metadata plus immutable files under a single data directory."""
 
@@ -41,11 +55,17 @@ class Store:
                 CREATE TABLE IF NOT EXISTS sites (
                     slug TEXT PRIMARY KEY,
                     current_deploy_id TEXT,
+                    repository_url TEXT,
+                    branch TEXT NOT NULL DEFAULT 'main',
+                    build_command TEXT,
+                    webhook_secret TEXT,
+                    quota_bytes INTEGER NOT NULL DEFAULT 104857600,
                     created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS domains (
                     hostname TEXT PRIMARY KEY,
-                    site_slug TEXT NOT NULL REFERENCES sites(slug) ON DELETE CASCADE
+                    site_slug TEXT NOT NULL REFERENCES sites(slug) ON DELETE CASCADE,
+                    verified_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS deploys (
                     id TEXT PRIMARY KEY,
@@ -56,10 +76,44 @@ class Store:
                     file_count INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS deploys_site_created ON deploys(site_slug, created_at DESC);
+                CREATE TABLE IF NOT EXISTS previews (
+                    site_slug TEXT NOT NULL REFERENCES sites(slug) ON DELETE CASCADE,
+                    preview_slug TEXT NOT NULL,
+                    ref TEXT NOT NULL,
+                    current_deploy_id TEXT NOT NULL REFERENCES deploys(id),
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY(site_slug, preview_slug)
+                );
+                CREATE TABLE IF NOT EXISTS deploy_jobs (
+                    id TEXT PRIMARY KEY,
+                    site_slug TEXT NOT NULL REFERENCES sites(slug) ON DELETE CASCADE,
+                    ref TEXT NOT NULL,
+                    commit_sha TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed')),
+                    requested_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    message TEXT
+                );
+                CREATE INDEX IF NOT EXISTS deploy_jobs_pending ON deploy_jobs(status, requested_at);
                 """
             )
+            self._ensure_column(db, "sites", "repository_url", "TEXT")
+            self._ensure_column(db, "sites", "branch", "TEXT NOT NULL DEFAULT 'main'")
+            self._ensure_column(db, "sites", "build_command", "TEXT")
+            self._ensure_column(db, "sites", "webhook_secret", "TEXT")
+            self._ensure_column(db, "sites", "quota_bytes", "INTEGER NOT NULL DEFAULT 104857600")
+            self._ensure_column(db, "domains", "verified_at", "TEXT")
 
-    def create_site(self, slug: str, domains: list[str]) -> None:
+    def create_site(
+        self,
+        slug: str,
+        domains: list[str],
+        repository_url: str | None = None,
+        branch: str = "main",
+        build_command: str | None = None,
+        quota_bytes: int = 100 * 1024 * 1024,
+    ) -> str:
         self._validate_slug(slug)
         normalized = [self._normalize_domain(domain) for domain in domains]
         if not normalized:
@@ -67,13 +121,19 @@ class Store:
         now = self._timestamp()
         try:
             with self._connect() as db:
-                db.execute("INSERT INTO sites(slug, created_at) VALUES (?, ?)", (slug, now))
+                webhook_secret = secrets.token_urlsafe(32) if repository_url else None
+                db.execute(
+                    """INSERT INTO sites(slug, repository_url, branch, build_command, webhook_secret, quota_bytes, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (slug, repository_url, branch, build_command, webhook_secret, quota_bytes, now),
+                )
                 db.executemany(
                     "INSERT INTO domains(hostname, site_slug) VALUES (?, ?)",
                     [(domain, slug) for domain in normalized],
                 )
         except sqlite3.IntegrityError as error:
             raise StoreError("site slug or domain already exists") from error
+        return webhook_secret or ""
 
     def list_sites(self) -> list[tuple[str, str | None, list[str]]]:
         with self._connect() as db:
@@ -86,11 +146,12 @@ class Store:
             ).fetchall()
         return [(row[0], row[1], row[2].split(",") if row[2] else []) for row in rows]
 
-    def deploy(self, slug: str, source: Path) -> Deploy:
+    def deploy(self, slug: str, source: Path, *, activate: bool = True) -> Deploy:
         if not source.is_dir():
             raise StoreError(f"deploy source is not a directory: {source}")
         self._site_exists(slug)
         digest, size_bytes, file_count = self._hash_directory(source)
+        self._ensure_quota(slug, size_bytes)
         deploy_id = digest[:16]
         destination = self.deploy_root / slug / deploy_id
         if not destination.exists():
@@ -107,8 +168,93 @@ class Store:
                 "INSERT OR IGNORE INTO deploys(id, site_slug, content_hash, created_at, size_bytes, file_count) VALUES (?, ?, ?, ?, ?, ?)",
                 (deploy.id, deploy.site_slug, deploy.content_hash, deploy.created_at, deploy.size_bytes, deploy.file_count),
             )
-            db.execute("UPDATE sites SET current_deploy_id = ? WHERE slug = ?", (deploy.id, slug))
+            if activate:
+                db.execute("UPDATE sites SET current_deploy_id = ? WHERE slug = ?", (deploy.id, slug))
         return deploy
+
+    def create_preview(self, slug: str, preview_slug: str, ref: str, deploy_id: str, expires_at: str) -> None:
+        self._site_exists(slug)
+        self._validate_slug(preview_slug)
+        with self._connect() as db:
+            exists = db.execute("SELECT 1 FROM deploys WHERE id = ? AND site_slug = ?", (deploy_id, slug)).fetchone()
+            if exists is None:
+                raise StoreError(f"unknown deploy for preview: {deploy_id}")
+            db.execute(
+                """INSERT INTO previews(site_slug, preview_slug, ref, current_deploy_id, expires_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(site_slug, preview_slug) DO UPDATE SET
+                    ref = excluded.ref, current_deploy_id = excluded.current_deploy_id, expires_at = excluded.expires_at""",
+                (slug, preview_slug, ref, deploy_id, expires_at),
+            )
+
+    def resolve_preview(self, preview_slug: str, site_slug: str) -> Path | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT current_deploy_id, expires_at FROM previews WHERE site_slug = ? AND preview_slug = ?",
+                (site_slug, preview_slug),
+            ).fetchone()
+        if row is None or row[1] <= self._timestamp():
+            return None
+        root = (self.deploy_root / site_slug / row[0]).resolve()
+        return root if root.is_dir() else None
+
+    def remove_expired_previews(self) -> int:
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM previews WHERE expires_at <= ?", (self._timestamp(),))
+            return cursor.rowcount
+
+    def queue_deploy(self, slug: str, ref: str, commit_sha: str) -> DeployJob:
+        self._site_exists(slug)
+        job = DeployJob(secrets.token_urlsafe(12), slug, ref, commit_sha, "queued", self._timestamp(), None)
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO deploy_jobs(id, site_slug, ref, commit_sha, status, requested_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (job.id, job.site_slug, job.ref, job.commit_sha, job.status, job.requested_at),
+            )
+        return job
+
+    def claim_job(self) -> DeployJob | None:
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT id, site_slug, ref, commit_sha, status, requested_at, message FROM deploy_jobs WHERE status = 'queued' ORDER BY requested_at LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE deploy_jobs SET status = 'running', started_at = ? WHERE id = ?", (self._timestamp(), row[0]))
+        return DeployJob(row[0], row[1], row[2], row[3], "running", row[5], row[6])
+
+    def finish_job(self, job_id: str, success: bool, message: str) -> None:
+        with self._connect() as db:
+            db.execute(
+                "UPDATE deploy_jobs SET status = ?, finished_at = ?, message = ? WHERE id = ?",
+                ("succeeded" if success else "failed", self._timestamp(), message[-4000:], job_id),
+            )
+
+    def list_jobs(self, slug: str | None = None) -> list[DeployJob]:
+        query = "SELECT id, site_slug, ref, commit_sha, status, requested_at, message FROM deploy_jobs"
+        parameters: tuple[str, ...] = ()
+        if slug:
+            query += " WHERE site_slug = ?"
+            parameters = (slug,)
+        query += " ORDER BY requested_at DESC"
+        with self._connect() as db:
+            rows = db.execute(query, parameters).fetchall()
+        return [DeployJob(*row) for row in rows]
+
+    def site_settings(self, slug: str) -> dict[str, object]:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT slug, repository_url, branch, build_command, webhook_secret, quota_bytes FROM sites WHERE slug = ?", (slug,)
+            ).fetchone()
+        if row is None:
+            raise StoreError(f"unknown site: {slug}")
+        return dict(zip(("slug", "repository_url", "branch", "build_command", "webhook_secret", "quota_bytes"), row, strict=True))
+
+    def is_known_domain(self, hostname: str) -> bool:
+        hostname = self._normalize_domain(hostname)
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM domains WHERE hostname = ?", (hostname,)).fetchone() is not None
 
     def list_deploys(self, slug: str) -> list[Deploy]:
         self._site_exists(slug)
@@ -148,6 +294,20 @@ class Store:
         db = sqlite3.connect(self.db_path)
         db.execute("PRAGMA foreign_keys = ON")
         return db
+
+    @staticmethod
+    def _ensure_column(db: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+        columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    def _ensure_quota(self, slug: str, size_bytes: int) -> None:
+        with self._connect() as db:
+            row = db.execute("SELECT quota_bytes FROM sites WHERE slug = ?", (slug,)).fetchone()
+        if row is None:
+            raise StoreError(f"unknown site: {slug}")
+        if size_bytes > row[0]:
+            raise StoreError(f"deploy is {size_bytes} bytes and exceeds the {row[0]} byte site quota")
 
     def _site_exists(self, slug: str) -> None:
         with self._connect() as db:
