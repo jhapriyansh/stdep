@@ -45,14 +45,15 @@ curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8080/_platform/api/si
 ## Git deploys and previews
 
 Create a Git-connected site. The command prints a webhook secret once; save it
-in the Gitea webhook configuration.
+in the Gitea or GitHub webhook configuration.
 
 ```bash
 staticdeploy --data-dir ./var site create docs docs.example.com \
   --repository-url https://gitea.example.com/me/docs.git --branch main
 
-# Gitea: POST /_platform/webhooks/gitea/docs
-# Event: push; secret: the value printed during site creation.
+# Gitea:  POST /_platform/webhooks/gitea/docs, event: push
+# GitHub: POST /_platform/webhooks/github/docs, event: push
+# In both cases, use the value printed during site creation as the secret.
 staticdeploy --data-dir ./var worker --watch
 ```
 

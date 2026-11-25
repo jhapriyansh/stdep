@@ -55,6 +55,8 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path.startswith("/_platform/webhooks/gitea/"):
             self._gitea_webhook(path.rsplit("/", 1)[-1])
+        elif path.startswith("/_platform/webhooks/github/"):
+            self._github_webhook(path.rsplit("/", 1)[-1])
         elif path.endswith("/rollback") and path.startswith("/_platform/api/sites/"):
             self._rollback(path.split("/")[4])
         else:
@@ -150,6 +152,29 @@ class StaticDeployHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "invalid webhook signature"}, "webhook")
             return
         if self.headers.get("X-Gitea-Event") != "push":
+            self._json(HTTPStatus.ACCEPTED, {"message": "ignored non-push event"}, "webhook")
+            return
+        try:
+            payload = json.loads(body)
+            job = self.config.store.queue_deploy(slug, str(payload["ref"]).removeprefix("refs/heads/"), str(payload["after"]))
+        except (KeyError, ValueError, json.JSONDecodeError, StoreError) as error:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)}, "webhook")
+            return
+        self._json(HTTPStatus.ACCEPTED, {"job_id": job.id, "status": job.status}, "webhook")
+
+    def _github_webhook(self, slug: str) -> None:
+        try:
+            secret = self.config.store.site_settings(slug)["webhook_secret"]
+        except StoreError:
+            self._json(HTTPStatus.NOT_FOUND, {"error": "unknown site"}, "webhook")
+            return
+        body = self._body()
+        digest = hmac.new(str(secret).encode(), body, hashlib.sha256).hexdigest() if secret else ""
+        expected = "sha256=" + digest
+        if not secret or not hmac.compare_digest(self.headers.get("X-Hub-Signature-256", ""), expected):
+            self._json(HTTPStatus.UNAUTHORIZED, {"error": "invalid webhook signature"}, "webhook")
+            return
+        if self.headers.get("X-GitHub-Event") != "push":
             self._json(HTTPStatus.ACCEPTED, {"message": "ignored non-push event"}, "webhook")
             return
         try:
