@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import resource
 import shlex
 import subprocess
@@ -34,9 +35,12 @@ class Worker:
         repository_url = settings["repository_url"]
         if not repository_url:
             raise StoreError("site has no repository URL; use a directory deploy instead")
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", job.commit_sha):
+            raise StoreError("webhook commit SHA is invalid")
         with tempfile.TemporaryDirectory(prefix="staticdeploy-") as temporary:
             checkout = Path(temporary) / "checkout"
             self._command(["git", "clone", "--depth", "1", "--branch", job.ref, str(repository_url), str(checkout)], Path(temporary))
+            self._command(["git", "checkout", "--detach", job.commit_sha], checkout)
             build_command = settings["build_command"]
             if build_command:
                 self._command(shlex.split(str(build_command)), checkout)

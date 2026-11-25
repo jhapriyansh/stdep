@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import re
 import secrets
 import shutil
 import sqlite3
@@ -152,7 +150,9 @@ class Store:
         self._site_exists(slug)
         digest, size_bytes, file_count = self._hash_directory(source)
         self._ensure_quota(slug, size_bytes)
-        deploy_id = digest[:16]
+        # IDs must remain unique across sites: deploys.id is a primary key and
+        # identical content may legitimately be deployed by two tenants.
+        deploy_id = f"{slug}-{digest[:16]}"
         destination = self.deploy_root / slug / deploy_id
         if not destination.exists():
             staging = destination.with_name(f".{deploy_id}.staging")
@@ -252,7 +252,10 @@ class Store:
         return dict(zip(("slug", "repository_url", "branch", "build_command", "webhook_secret", "quota_bytes"), row, strict=True))
 
     def is_known_domain(self, hostname: str) -> bool:
-        hostname = self._normalize_domain(hostname)
+        try:
+            hostname = self._normalize_domain(hostname)
+        except StoreError:
+            return False
         with self._connect() as db:
             return db.execute("SELECT 1 FROM domains WHERE hostname = ?", (hostname,)).fetchone() is not None
 
@@ -293,6 +296,8 @@ class Store:
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path)
         db.execute("PRAGMA foreign_keys = ON")
+        db.execute("PRAGMA journal_mode = WAL")
+        db.execute("PRAGMA busy_timeout = 5000")
         return db
 
     @staticmethod
@@ -323,7 +328,9 @@ class Store:
     @staticmethod
     def _normalize_domain(domain: str) -> str:
         domain = domain.lower().strip().rstrip(".")
-        if not domain or "/" in domain or " " in domain:
+        labels = domain.split(".")
+        valid_label = lambda label: bool(label) and len(label) <= 63 and label[0].isalnum() and label[-1].isalnum() and all(c.isascii() and (c.isalnum() or c == "-") for c in label)
+        if len(domain) > 253 or not all(valid_label(label) for label in labels):
             raise StoreError(f"invalid domain: {domain!r}")
         return domain
 
@@ -337,7 +344,11 @@ class Store:
         hasher = hashlib.sha256()
         size_bytes = 0
         file_count = 0
-        for path in sorted(p for p in source.rglob("*") if p.is_file() and ".git" not in p.parts):
+        paths = sorted(source.rglob("*"))
+        for path in paths:
+            if path.is_symlink():
+                raise StoreError(f"symlinks are not allowed in a deploy: {path.relative_to(source)}")
+        for path in (path for path in paths if path.is_file() and ".git" not in path.parts):
             relative = path.relative_to(source).as_posix().encode()
             hasher.update(len(relative).to_bytes(4, "big"))
             hasher.update(relative)

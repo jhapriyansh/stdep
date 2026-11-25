@@ -80,3 +80,40 @@ class StoreTests(unittest.TestCase):
             with self.assertRaisesRegex(StoreError, "exceeds"):
                 store.deploy("demo", oversized)
 
+    def test_identical_content_is_isolated_per_site(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            store = Store(tmp_path / "data")
+            store.initialize()
+            store.create_site("one", ["one.test"])
+            store.create_site("two", ["two.test"])
+            source = tmp_path / "site"
+            write_site(source, "same")
+            one = store.deploy("one", source)
+            two = store.deploy("two", source)
+            self.assertNotEqual(one.id, two.id)
+            self.assertEqual(store.list_deploys("one")[0].id, one.id)
+            self.assertEqual(store.list_deploys("two")[0].id, two.id)
+
+    def test_rejects_symlinked_deploy_content(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tmp_path = Path(temp_dir)
+            store = Store(tmp_path / "data")
+            store.initialize()
+            store.create_site("demo", ["demo.test"])
+            source = tmp_path / "site"
+            source.mkdir()
+            target = tmp_path / "outside.txt"
+            target.write_text("secret")
+            (source / "index.html").symlink_to(target)
+            with self.assertRaisesRegex(StoreError, "symlinks"):
+                store.deploy("demo", source)
+
+    def test_rejects_invalid_domain_and_treats_it_as_unknown(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "data")
+            store.initialize()
+            with self.assertRaisesRegex(StoreError, "invalid domain"):
+                store.create_site("demo", ["bad/domain"])
+            self.assertFalse(store.is_known_domain("bad/domain"))
+
