@@ -127,3 +127,22 @@ class StoreTests(unittest.TestCase):
             with self.assertRaisesRegex(StoreError, "invalid deployment commit SHA"):
                 store.queue_deploy("demo", "main", "not-a-sha")
 
+    def test_first_admin_gates_user_onboarding_and_owns_existing_sites(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "data")
+            store.initialize()
+            store.create_site("legacy", ["legacy.test"])
+            with self.assertRaisesRegex(StoreError, "admin must be created"):
+                store.create_user("player", "a-secure-password")
+            admin = store.create_first_admin("admin-player", "a-secure-password")
+            self.assertEqual(admin.role, "admin")
+            self.assertEqual([site[0] for site in store.list_sites(admin.id)], ["legacy"])
+            player = store.create_user("player-one", "another-secure-password")
+            self.assertEqual(player.role, "user")
+            self.assertEqual(store.authenticate("player-one", "bad-password"), None)
+            self.assertEqual(store.authenticate("player-one", "another-secure-password"), player)
+            token = store.create_session(player)
+            self.assertEqual(store.session_user(token), player)
+            store.delete_session(token)
+            self.assertIsNone(store.session_user(token))
+

@@ -6,8 +6,9 @@ import re
 import secrets
 import shutil
 import sqlite3
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -46,6 +47,14 @@ class DeployJob:
     message: str | None
 
 
+@dataclass(frozen=True)
+class User:
+    id: int
+    username: str
+    role: str
+    created_at: str
+
+
 class Store:
     """SQLite metadata plus immutable files under a single data directory."""
 
@@ -63,6 +72,7 @@ class Store:
                 PRAGMA foreign_keys = ON;
                 CREATE TABLE IF NOT EXISTS sites (
                     slug TEXT PRIMARY KEY,
+                    owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                     current_deploy_id TEXT,
                     repository_url TEXT,
                     branch TEXT NOT NULL DEFAULT 'main',
@@ -105,8 +115,23 @@ class Store:
                     message TEXT
                 );
                 CREATE INDEX IF NOT EXISTS deploy_jobs_pending ON deploy_jobs(status, requested_at);
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS sessions_user_expiry ON sessions(user_id, expires_at);
                 """
             )
+            self._ensure_column(db, "sites", "owner_user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL")
             self._ensure_column(db, "sites", "repository_url", "TEXT")
             self._ensure_column(db, "sites", "branch", "TEXT NOT NULL DEFAULT 'main'")
             self._ensure_column(db, "sites", "build_command", "TEXT")
@@ -122,6 +147,7 @@ class Store:
         branch: str = "main",
         build_command: str | None = None,
         quota_bytes: int = 100 * 1024 * 1024,
+        owner_user_id: int | None = None,
     ) -> str:
         self._validate_slug(slug)
         normalized = [self._normalize_domain(domain) for domain in domains]
@@ -132,9 +158,9 @@ class Store:
             with self._connect() as db:
                 webhook_secret = secrets.token_urlsafe(32) if repository_url else None
                 db.execute(
-                    """INSERT INTO sites(slug, repository_url, branch, build_command, webhook_secret, quota_bytes, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (slug, repository_url, branch, build_command, webhook_secret, quota_bytes, now),
+                    """INSERT INTO sites(slug, owner_user_id, repository_url, branch, build_command, webhook_secret, quota_bytes, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (slug, owner_user_id, repository_url, branch, build_command, webhook_secret, quota_bytes, now),
                 )
                 db.executemany(
                     "INSERT INTO domains(hostname, site_slug) VALUES (?, ?)",
@@ -144,14 +170,21 @@ class Store:
             raise StoreError("site slug or domain already exists") from error
         return webhook_secret or ""
 
-    def list_sites(self) -> list[tuple[str, str | None, list[str]]]:
+    def list_sites(self, owner_user_id: int | None = None) -> list[tuple[str, str | None, list[str]]]:
+        where = ""
+        parameters: tuple[int, ...] = ()
+        if owner_user_id is not None:
+            where = "WHERE s.owner_user_id = ?"
+            parameters = (owner_user_id,)
         with self._connect() as db:
             rows = db.execute(
-                """
+                f"""
                 SELECT s.slug, s.current_deploy_id, GROUP_CONCAT(d.hostname, ',') AS domains
                 FROM sites s LEFT JOIN domains d ON d.site_slug = s.slug
+                {where}
                 GROUP BY s.slug ORDER BY s.slug
-                """
+                """,
+                parameters,
             ).fetchall()
         return [(row[0], row[1], row[2].split(",") if row[2] else []) for row in rows]
 
@@ -266,6 +299,106 @@ class Store:
             raise StoreError(f"unknown site: {slug}")
         return dict(zip(("slug", "repository_url", "branch", "build_command", "webhook_secret", "quota_bytes"), row, strict=True))
 
+    def has_users(self) -> bool:
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
+
+    def create_first_admin(self, username: str, password: str) -> User:
+        username = self._normalize_username(username)
+        self._validate_password(password)
+        with self._connect() as db:
+            if db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None:
+                raise StoreError("the first admin has already been created")
+            cursor = db.execute(
+                "INSERT INTO users(username, password_hash, role, created_at) VALUES (?, ?, 'admin', ?)",
+                (username, self._hash_password(password), self._timestamp()),
+            )
+            db.execute("UPDATE sites SET owner_user_id = ? WHERE owner_user_id IS NULL", (cursor.lastrowid,))
+        return self.get_user(int(cursor.lastrowid))
+
+    def create_user(self, username: str, password: str) -> User:
+        if not self.has_users():
+            raise StoreError("an admin must be created before users can join")
+        username = self._normalize_username(username)
+        self._validate_password(password)
+        try:
+            with self._connect() as db:
+                cursor = db.execute(
+                    "INSERT INTO users(username, password_hash, role, created_at) VALUES (?, ?, 'user', ?)",
+                    (username, self._hash_password(password), self._timestamp()),
+                )
+        except sqlite3.IntegrityError as error:
+            raise StoreError("that username is already taken") from error
+        return self.get_user(int(cursor.lastrowid))
+
+    def authenticate(self, username: str, password: str) -> User | None:
+        username = username.lower().strip()
+        with self._connect() as db:
+            row = db.execute("SELECT id, username, password_hash, role, created_at FROM users WHERE username = ?", (username,)).fetchone()
+        if row is None or not self._verify_password(password, row[2]):
+            return None
+        return User(row[0], row[1], row[3], row[4])
+
+    def get_user(self, user_id: int) -> User:
+        with self._connect() as db:
+            row = db.execute("SELECT id, username, role, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise StoreError("unknown user")
+        return User(*row)
+
+    def list_users(self) -> list[User]:
+        with self._connect() as db:
+            rows = db.execute("SELECT id, username, role, created_at FROM users ORDER BY created_at").fetchall()
+        return [User(*row) for row in rows]
+
+    def create_session(self, user: User, lifetime_days: int = 7) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO sessions(token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+                (self._token_hash(token), user.id, (datetime.now(UTC) + timedelta(days=lifetime_days)).isoformat(), self._timestamp()),
+            )
+        return token
+
+    def session_user(self, token: str | None) -> User | None:
+        if not token:
+            return None
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT u.id, u.username, u.role, u.created_at FROM sessions s
+                JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?""",
+                (self._token_hash(token), self._timestamp()),
+            ).fetchone()
+        return User(*row) if row else None
+
+    def delete_session(self, token: str | None) -> None:
+        if token:
+            with self._connect() as db:
+                db.execute("DELETE FROM sessions WHERE token_hash = ?", (self._token_hash(token),))
+
+    @staticmethod
+    def _token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        salt = os.urandom(16)
+        derived = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+        return "scrypt$" + urlsafe_b64encode(salt).decode() + "$" + urlsafe_b64encode(derived).decode()
+
+    @staticmethod
+    def _verify_password(password: str, encoded: str) -> bool:
+        try:
+            algorithm, salt_text, digest_text = encoded.split("$", 2)
+            if algorithm != "scrypt":
+                return False
+            salt = urlsafe_b64decode(salt_text.encode())
+            expected = urlsafe_b64decode(digest_text.encode())
+            actual = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+            return secrets.compare_digest(actual, expected)
+        except (ValueError, TypeError):
+            return False
+
     def is_known_domain(self, hostname: str) -> bool:
         try:
             hostname = self._normalize_domain(hostname)
@@ -366,6 +499,18 @@ class Store:
     def _validate_slug(slug: str) -> None:
         if not slug or len(slug) > 63 or not all(c.isascii() and (c.islower() or c.isdigit() or c == "-") for c in slug):
             raise StoreError("site slug must contain lowercase letters, digits, and hyphens only")
+
+    @staticmethod
+    def _normalize_username(username: str) -> str:
+        username = username.lower().strip()
+        if not 3 <= len(username) <= 32 or not all(c.isascii() and (c.islower() or c.isdigit() or c in "_-" ) for c in username):
+            raise StoreError("username must be 3-32 lowercase letters, digits, underscores, or hyphens")
+        return username
+
+    @staticmethod
+    def _validate_password(password: str) -> None:
+        if len(password) < 12:
+            raise StoreError("password must be at least 12 characters")
 
     @staticmethod
     def _hash_directory(source: Path) -> tuple[str, int, int]:
