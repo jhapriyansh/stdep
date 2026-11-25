@@ -34,7 +34,7 @@ class ServerTests(unittest.TestCase):
             deployed = store.deploy("demo", source, activate=False)
             store.create_preview("demo", "feature", "feature", deployed.id, (datetime.now(UTC) + timedelta(hours=1)).isoformat())
             handler = object.__new__(StaticDeployHandler)
-            handler.config = PlatformConfig(store, "token", "preview.test", "subdomain", Metrics())
+            handler.config = PlatformConfig(store, "token", "preview.test", "subdomain", False, Metrics())
             handler.headers = {"Host": "feature--demo.preview.test"}
             resolved = handler._resolve_site_root()
             self.assertIsNotNone(resolved)
@@ -59,7 +59,7 @@ class ServerTests(unittest.TestCase):
             deployed = store.deploy("demo", source)
             store.create_preview("demo", "feature", "feature", deployed.id, (datetime.now(UTC) + timedelta(hours=1)).isoformat())
             handler = object.__new__(StaticDeployHandler)
-            handler.config = PlatformConfig(store, "token", None, "path", Metrics())
+            handler.config = PlatformConfig(store, "token", None, "path", False, Metrics())
 
             handler.path = "/sites/demo/"
             site_route = handler._resolve_content()

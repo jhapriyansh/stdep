@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("STATICDEPLOY_ROUTING_MODE", "subdomain"),
         help="serve by Host header (subdomain) or /sites/<slug>/ paths (path)",
     )
+    edge.add_argument("--secure-cookies", action="store_true", default=os.environ.get("STATICDEPLOY_SECURE_COOKIES", "").lower() == "true")
     worker = commands.add_parser("worker", help="process one queued Git deployment")
     worker.add_argument("--preview-ttl-hours", type=int, default=72)
     worker.add_argument("--command-timeout", type=int, default=180)
@@ -90,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "serve":
             serve(
                 store, args.host, args.port, admin_token=args.admin_token,
-                preview_suffix=args.preview_suffix, routing_mode=args.routing_mode,
+                preview_suffix=args.preview_suffix, routing_mode=args.routing_mode, secure_cookies=args.secure_cookies,
             )
         elif args.command == "worker":
             worker = Worker(store, preview_ttl_hours=args.preview_ttl_hours, command_timeout=args.command_timeout)

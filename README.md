@@ -5,6 +5,15 @@ and JavaScript sites. It deliberately does not run web applications or offer
 databases. That constraint keeps the data plane inexpensive and makes deploys
 immutable, auditable, and instant to roll back.
 
+## Accounts and consoles
+
+The first visit to `/_platform/` opens a one-time **First Player** setup page.
+It creates the initial administrator; public player signup remains unavailable
+until that step is complete. The administrator gets the **Control Room** with
+player and site inventory, while each player gets a separate **Site Cartridge**
+catalog and can create only their own sites. Sessions use scrypt password hashes
+and HTTP-only cookies; the Docker/Caddy deployment marks those cookies `Secure`.
+
 ## What it does
 
 - Creates sites with one or more custom domains and a per-site artifact quota.
