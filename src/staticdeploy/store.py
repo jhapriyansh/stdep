@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import secrets
 import shutil
 import sqlite3
+import stat
+import tempfile
+import zipfile
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -216,6 +220,43 @@ class Store:
                 db.execute("UPDATE sites SET current_deploy_id = ? WHERE slug = ?", (deploy.id, slug))
         return deploy
 
+    def deploy_zip(self, slug: str, archive: bytes) -> Deploy:
+        """Validate and deploy a static-site ZIP without trusting archive paths."""
+        if not archive:
+            raise StoreError("upload an archive before deploying")
+        if len(archive) > 50 * 1024 * 1024:
+            raise StoreError("archive exceeds the 50 MiB upload limit")
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+                infos = [info for info in zipped.infolist() if not info.is_dir()]
+                if not infos:
+                    raise StoreError("archive does not contain any files")
+                if len(infos) > 10_000:
+                    raise StoreError("archive contains too many files")
+                total_uncompressed = sum(info.file_size for info in infos)
+                if total_uncompressed > 250 * 1024 * 1024:
+                    raise StoreError("archive expands beyond the 250 MiB deployment limit")
+                with tempfile.TemporaryDirectory(prefix="staticdeploy-upload-", dir=self.data_dir) as temporary:
+                    root = Path(temporary)
+                    for info in infos:
+                        target = (root / info.filename).resolve()
+                        if target == root or root not in target.parents or Path(info.filename).is_absolute():
+                            raise StoreError("archive contains an unsafe path")
+                        if stat.S_IFMT(info.external_attr >> 16) == stat.S_IFLNK:
+                            raise StoreError("archive contains a symlink, which is not allowed")
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zipped.open(info) as source, target.open("wb") as destination:
+                            shutil.copyfileobj(source, destination)
+                    # Allow archives produced from a top-level project directory while
+                    # still requiring an actual static entry point.
+                    children = [path for path in root.iterdir() if path.name != "__MACOSX"]
+                    source = children[0] if len(children) == 1 and children[0].is_dir() and (children[0] / "index.html").is_file() else root
+                    if not (source / "index.html").is_file():
+                        raise StoreError("archive must contain index.html at its deploy root")
+                    return self.deploy(slug, source)
+        except zipfile.BadZipFile as error:
+            raise StoreError("upload must be a valid ZIP archive") from error
+
     def create_preview(self, slug: str, preview_slug: str, ref: str, deploy_id: str, expires_at: str) -> None:
         self._site_exists(slug)
         self._validate_slug(preview_slug)
@@ -415,6 +456,10 @@ class Store:
                 (slug,),
             ).fetchall()
         return [Deploy(*row) for row in rows]
+
+    def site_belongs_to(self, slug: str, user_id: int) -> bool:
+        with self._connect() as db:
+            return db.execute("SELECT 1 FROM sites WHERE slug = ? AND owner_user_id = ?", (slug, user_id)).fetchone() is not None
 
     def rollback(self, slug: str, deploy_id: str) -> None:
         with self._connect() as db:

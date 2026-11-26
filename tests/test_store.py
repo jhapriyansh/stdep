@@ -2,6 +2,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
+from zipfile import ZipFile
 
 from staticdeploy.store import Store, StoreError
 
@@ -13,6 +15,13 @@ def write_site(root: Path, body: str) -> None:
 
 
 class StoreTests(unittest.TestCase):
+    @staticmethod
+    def zip_site(files: dict[str, str]) -> bytes:
+        buffer = BytesIO()
+        with ZipFile(buffer, "w") as archive:
+            for path, contents in files.items():
+                archive.writestr(path, contents)
+        return buffer.getvalue()
     def test_deploy_resolve_and_rollback(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tmp_path = Path(temp_dir)
@@ -126,6 +135,25 @@ class StoreTests(unittest.TestCase):
                 store.queue_deploy("demo", "-bad", "a" * 40)
             with self.assertRaisesRegex(StoreError, "invalid deployment commit SHA"):
                 store.queue_deploy("demo", "main", "not-a-sha")
+
+    def test_deploys_validated_zip_and_rejects_unsafe_archives(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = Store(Path(temp_dir) / "data")
+            store.initialize()
+            store.create_site("demo", ["demo.test"])
+            first = store.deploy_zip("demo", self.zip_site({"index.html": "one", "assets/main.css": "body{}"}))
+            second = store.deploy_zip("demo", self.zip_site({"index.html": "two"}))
+            resolved = store.resolve_site("demo")
+            self.assertIsNotNone(resolved)
+            assert resolved is not None
+            self.assertEqual((resolved / "index.html").read_text(), "two")
+            store.rollback("demo", first.id)
+            resolved = store.resolve_site("demo")
+            self.assertEqual((resolved / "index.html").read_text(), "one")  # type: ignore[union-attr]
+            with self.assertRaisesRegex(StoreError, "unsafe path"):
+                store.deploy_zip("demo", self.zip_site({"../outside.html": "no"}))
+            with self.assertRaisesRegex(StoreError, "index.html"):
+                store.deploy_zip("demo", self.zip_site({"readme.txt": "no"}))
 
     def test_first_admin_gates_user_onboarding_and_owns_existing_sites(self) -> None:
         with TemporaryDirectory() as temp_dir:
