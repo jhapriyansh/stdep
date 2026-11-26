@@ -7,11 +7,11 @@ immutable, auditable, and instant to roll back.
 
 ## Accounts and consoles
 
-The first visit to `/_platform/` opens a one-time **First Player** setup page.
-It creates the initial administrator; public player signup remains unavailable
-until that step is complete. The administrator gets the **Control Room** with
-player and site inventory, while each player gets a separate **Site Cartridge**
-catalog and can create only their own sites. Sessions use scrypt password hashes
+The first visit to `/_platform/` opens a one-time **Initial Admin Setup** page.
+It creates the initial administrator; member signup remains unavailable until
+that step is complete. The administrator gets the **Control Console** with
+member and site inventory, while each member gets a separate **My Sites**
+workspace and can create only their own sites. Sessions use scrypt password hashes
 and HTTP-only cookies; the Docker/Caddy deployment marks those cookies `Secure`.
 
 ## What it does
@@ -27,6 +27,8 @@ and HTTP-only cookies; the Docker/Caddy deployment marks those cookies `Secure`.
 - Publishes non-primary branches as expiring preview deployments.
 - Provides a token-protected JSON management API, dashboard, health endpoint,
   and Prometheus-compatible request metrics.
+- Lets account owners upload validated static-site ZIP archives, inspect deploy
+  history, and revert their own sites; admins can manage every site.
 - Ships with Docker Compose and Caddy on-demand TLS. Caddy asks the control
   plane before it obtains a certificate, preventing arbitrary certificate use.
 
