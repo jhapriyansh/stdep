@@ -47,6 +47,20 @@ staticdeploy --data-dir ./var deploy create portfolio ./example-site
 STATICDEPLOY_ADMIN_TOKEN=dev-token staticdeploy --data-dir ./var serve --port 8080
 ```
 
+### Mac quick start
+
+The scripts below keep Python packages inside `.venv` and use path routing, so
+no domain is required for local testing:
+
+```bash
+./scripts/first-time-init.sh
+./scripts/start.sh
+```
+
+Open `http://localhost:8080/_platform/` to create the first administrator.
+To erase all local accounts, deployments, and data while retaining source code,
+run `./scripts/complete-reset.sh --yes`.
+
 Visit `http://localhost:8080`. The control API requires
 `Authorization: Bearer dev-token`; for example:
 
