@@ -142,7 +142,7 @@ class StoreTests(unittest.TestCase):
             store.initialize()
             store.create_site("demo", ["demo.test"])
             first = store.deploy_zip("demo", self.zip_site({"index.html": "one", "assets/main.css": "body{}"}))
-            second = store.deploy_zip("demo", self.zip_site({"index.html": "two"}))
+            second = store.deploy_zip("demo", self.zip_site({"site/index.html": "two", "site/assets/main.css": "body{}", "__MACOSX/._site": "metadata", ".DS_Store": "metadata"}))
             resolved = store.resolve_site("demo")
             self.assertIsNotNone(resolved)
             assert resolved is not None

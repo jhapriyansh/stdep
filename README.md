@@ -29,6 +29,11 @@ and HTTP-only cookies; the Docker/Caddy deployment marks those cookies `Secure`.
   and Prometheus-compatible request metrics.
 - Lets account owners upload validated static-site ZIP archives, inspect deploy
   history, and revert their own sites; admins can manage every site.
+
+For dashboard ZIP uploads, either archive `index.html` and assets directly at
+the ZIP root, or archive one top-level project folder containing `index.html`.
+StaticDeploy detects both formats and ignores macOS `__MACOSX`/`.DS_Store`
+metadata.
 - Ships with Docker Compose and Caddy on-demand TLS. Caddy asks the control
   plane before it obtains a certificate, preventing arbitrary certificate use.
 

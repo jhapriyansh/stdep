@@ -247,10 +247,11 @@ class Store:
                         target.parent.mkdir(parents=True, exist_ok=True)
                         with zipped.open(info) as source, target.open("wb") as destination:
                             shutil.copyfileobj(source, destination)
-                    # Allow archives produced from a top-level project directory while
-                    # still requiring an actual static entry point.
-                    children = [path for path in root.iterdir() if path.name != "__MACOSX"]
-                    source = children[0] if len(children) == 1 and children[0].is_dir() and (children[0] / "index.html").is_file() else root
+                    # Accept both common ZIP layouts: files at archive root, or
+                    # one project folder at root. Ignore macOS archive metadata.
+                    children = [path for path in root.iterdir() if path.name not in {"__MACOSX", ".DS_Store"}]
+                    candidates = [path for path in children if path.is_dir() and (path / "index.html").is_file()]
+                    source = root if (root / "index.html").is_file() else candidates[0] if len(candidates) == 1 else root
                     if not (source / "index.html").is_file():
                         raise StoreError("archive must contain index.html at its deploy root")
                     return self.deploy(slug, source)
